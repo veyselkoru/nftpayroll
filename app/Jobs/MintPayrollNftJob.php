@@ -4,14 +4,15 @@ namespace App\Jobs;
 
 use App\Models\NftMint;
 use App\Models\Payroll;
+use App\Services\IpfsClient;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\Process\Process;
-use Illuminate\Support\Facades\Http;
 
 class MintPayrollNftJob implements ShouldQueue
 {
@@ -20,7 +21,9 @@ class MintPayrollNftJob implements ShouldQueue
     public $tries = 5;
     public $retryAfter = 10;
 
-    // 🔴 ARTIK MODEL DEĞİL, SADECE ID TUTUYORUZ
+    /**
+     * Model taşımıyoruz, sadece ID taşıyoruz (typed property hatasına çözüm)
+     */
     public int $nftMintId;
 
     public function __construct(NftMint $nftMint)
@@ -30,7 +33,7 @@ class MintPayrollNftJob implements ShouldQueue
 
     public function handle(): void
     {
-        // 🔴 MODELİ BURADA TEKRAR ÇEK
+        // NftMint + Payroll + Employee ilişkileriyle beraber yükle
         $nftMint = NftMint::with('payroll.employee')->find($this->nftMintId);
 
         if (! $nftMint) {
@@ -44,26 +47,32 @@ class MintPayrollNftJob implements ShouldQueue
             return;
         }
 
-        // sadece pending ise işleme al
+        // Sadece pending durumunda işleme al
         if ($nftMint->status !== 'pending') {
             return;
         }
 
-        $walletAddress = $nftMint->wallet_address ?: $payroll->employee->wallet_address;
+        // Cüzdan adresi (önce NftMint, yoksa employee wallet)
+        $walletAddress = $nftMint->wallet_address ?: optional($payroll->employee)->wallet_address;
 
-        if (! $walletAddress || strtolower($walletAddress) === '0x0000000000000000000000000000000000000000') {
+        // ZERO ADDRESS veya boşsa iptal
+        if (
+            ! $walletAddress ||
+            strtolower($walletAddress) === '0x0000000000000000000000000000000000000000'
+        ) {
             $this->failJob($nftMint, $payroll, 'Wallet address empty or zero address');
             return;
         }
 
-        // processing
-        $nftMint->update(['status' => 'processing']);
-
-        // Basit metadata örneği
+        /*
+        |--------------------------------------------------------------------------
+        | 1) METADATA OLUŞTUR
+        |--------------------------------------------------------------------------
+        */
         $metadata = [
             'name'        => "Payroll NFT #{$payroll->id}",
             'description' => "Payroll token for employee #{$payroll->employee_id}",
-            'data' => [
+            'data'        => [
                 'period_start' => $payroll->period_start,
                 'period_end'   => $payroll->period_end,
                 'gross_salary' => $payroll->gross_salary,
@@ -71,10 +80,18 @@ class MintPayrollNftJob implements ShouldQueue
             ],
         ];
 
-        // --- IPFS CID (şimdilik fake, sonra gerçek servise bağlarız) ---
+        /*
+        |--------------------------------------------------------------------------
+        | 2) IPFS (Pinata) ÜZERİNDEN METADATA YÜKLE → CID AL
+        |--------------------------------------------------------------------------
+        */
         try {
-            $ipfsCid = 'bafy' . substr(sha1(json_encode($metadata)), 0, 20);
+            $json    = json_encode($metadata, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            /** @var IpfsClient $ipfs */
+            $ipfs    = app(IpfsClient::class);
+            $ipfsCid = $ipfs->uploadString($json); // Pinata → IpfsHash
 
+            // Hem payroll hem nft_mints tablosuna yaz
             $nftMint->update(['ipfs_cid' => $ipfsCid]);
             $payroll->update(['ipfs_cid' => $ipfsCid]);
         } catch (\Throwable $e) {
@@ -82,10 +99,16 @@ class MintPayrollNftJob implements ShouldQueue
             return;
         }
 
-        // --- Node mint.js çağrısı ---
-        try {
-            $tokenUri = 'ipfs://' . $ipfsCid;
+        $tokenUri = 'ipfs://' . $ipfsCid;
 
+        /*
+        |--------------------------------------------------------------------------
+        | 3) NODE SCRIPT İLE MINT
+        |--------------------------------------------------------------------------
+        */
+        $nftMint->update(['status' => 'sending']);
+
+        try {
             $projectRoot = base_path();
             $scriptPath  = $projectRoot . '/chain-worker/mint.js';
 
@@ -105,19 +128,40 @@ class MintPayrollNftJob implements ShouldQueue
 
             if (! $process->isSuccessful()) {
                 $error = $process->getErrorOutput() ?: $process->getOutput();
-                $this->failJob($nftMint, $payroll, 'Mint failed (node): '.trim($error));
+                Log::error('Mint failed (node)', ['error' => $error]);
+
+                $nftMint->update([
+                    'status'        => 'failed',
+                    'error_message' => trim($error),
+                ]);
+
+                $payroll->update(['status' => 'mint_failed']);
+
                 return;
             }
 
             $output = trim($process->getOutput());
             $lines  = preg_split("/\r\n|\n|\r/", $output);
-            $txHash = trim(end($lines));
+            $txHash = trim(end($lines));   // dotenv vs. satırlar varsa, son satır hash
 
+            // Hash formatı kontrolü
             if (! str_starts_with($txHash, '0x') || strlen($txHash) !== 66) {
-                $this->failJob($nftMint, $payroll, 'Invalid tx hash format from node script');
+                Log::warning('Unexpected tx hash format', [
+                    'raw_output' => $output,
+                    'parsed'     => $txHash,
+                ]);
+
+                $nftMint->update([
+                    'status'        => 'failed',
+                    'error_message' => 'Invalid tx hash format from node script',
+                ]);
+
+                $payroll->update(['status' => 'mint_failed']);
+
                 return;
             }
 
+            // Başarılı mint → tx_hash ve status
             $nftMint->update([
                 'status'  => 'sent',
                 'tx_hash' => $txHash,
@@ -129,13 +173,16 @@ class MintPayrollNftJob implements ShouldQueue
                 'nft_mint_id' => $nftMint->id,
                 'tx_hash'     => $txHash,
             ]);
-
         } catch (\Throwable $e) {
             $this->failJob($nftMint, $payroll, 'Mint exception: '.$e->getMessage());
             return;
         }
 
-        // --- Tx receipt → tokenId çöz ---
+        /*
+        |--------------------------------------------------------------------------
+        | 4) TRANSACTION RECEIPT → TOKEN ID ÇÖZ
+        |--------------------------------------------------------------------------
+        */
         try {
             $rpcUrl = env('CHAIN_RPC_URL');
 
@@ -168,39 +215,43 @@ class MintPayrollNftJob implements ShouldQueue
             $tokenId = null;
 
             foreach ($result['logs'] as $log) {
+                // Sadece bizim kontrat
                 if (strtolower($log['address'] ?? '') !== $contractAddress) {
                     continue;
                 }
 
+                // Transfer event
                 if (! isset($log['topics'][0]) || strtolower($log['topics'][0]) !== $transferSig) {
                     continue;
                 }
 
+                // tokenId topic[3]
                 if (! isset($log['topics'][3])) {
                     continue;
                 }
 
                 $tokenIdHex = $log['topics'][3];
                 $tokenId    = hexdec($tokenIdHex);
-
                 break;
             }
 
-            if ($tokenId !== null) {
-                $nftMint->update([
-                    'token_id' => $tokenId,
-                ]);
-
-                Log::info('Token ID resolved', [
-                    'nft_mint_id' => $nftMint->id,
-                    'tx_hash'     => $txHash,
-                    'token_id'    => $tokenId,
-                ]);
+            if ($tokenId === null) {
+                throw new \Exception('Transfer event not found for contract');
             }
 
+            $nftMint->update([
+                'token_id' => $tokenId,
+            ]);
+
+            Log::info('Token ID resolved', [
+                'nft_mint_id' => $nftMint->id,
+                'tx_hash'     => $txHash,
+                'token_id'    => $tokenId,
+            ]);
         } catch (\Throwable $e) {
             Log::warning('Token ID resolve failed', [
                 'nft_mint_id' => $nftMint->id,
+                'tx_hash'     => $txHash ?? null,
                 'error'       => $e->getMessage(),
             ]);
         }
