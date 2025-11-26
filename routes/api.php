@@ -18,20 +18,7 @@ Route::get('/health', fn () => response()->json([
 Route::post('/register', [AuthController::class, 'register']);
 Route::post('/login',    [AuthController::class, 'login']);
 
-Route::post(
-    '/companies/{company}/employees/{employee}/payrolls/{payroll}/queue',
-    [PayrollQueueController::class, 'queue']
-)->middleware('auth:sanctum');
 
-Route::get(
-    '/companies/{company}/employees/{employee}/payrolls/{payroll}/status',
-    [PayrollController::class, 'status']
-)->middleware('auth:sanctum');
-
-Route::post(
-    '/companies/{company}/employees/{employee}/payrolls/{payroll}/mint/retry',
-    [PayrollController::class, 'retryMint']
-)->middleware('auth:sanctum');
 
 
 
@@ -44,5 +31,26 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('companies.employees', EmployeeController::class);
     Route::apiResource('companies.employees.payrolls', PayrollController::class);
 
-    Route::get('/companies/{company}/employees/{employee}/nfts',[EmployeeController::class, 'nfts']);    
+    Route::get('/companies/{company}/employees/{employee}/nfts',[EmployeeController::class, 'nfts']);   
+    
+    Route::post(
+        '/companies/{company}/employees/{employee}/payrolls/{payroll}/queue',
+        [PayrollQueueController::class, 'queue']
+    )->middleware('auth:sanctum');
+    
+    Route::get(
+        '/companies/{company}/employees/{employee}/payrolls/{payroll}/status',
+        [PayrollController::class, 'status']
+    )->middleware('auth:sanctum');
+    
+    Route::post(
+        '/companies/{company}/employees/{employee}/payrolls/{payroll}/mint/retry',
+        [PayrollController::class, 'retryMint']
+    )->middleware('auth:sanctum');
+
+    Route::get(
+        '/companies/{company}/employees/{employee}/payrolls/{payroll}/decrypt',
+        [PayrollController::class, 'decryptPayload']
+    )->middleware('auth:sanctum');
+    
 });

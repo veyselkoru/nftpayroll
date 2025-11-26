@@ -211,4 +211,39 @@ class PayrollController extends Controller
             'nft_mint_id' => $nftMint->id,
         ]);
     }
+
+    public function decryptPayload(
+        Request $request,
+        Company $company,
+        Employee $employee,
+        Payroll $payroll,
+        PayrollEncryptionService $encryptionService
+    ) {
+        $this->authorizeAccess($request, $company, $employee);
+        $this->ensurePayrollBelongsToEmployee($payroll, $employee);
+
+        if (! $payroll->encrypted_payload) {
+            return response()->json([
+                'message' => 'No encrypted payroll data found.'
+            ], 404);
+        }
+
+        try {
+            // 🔐 KENDİ SERVİSİNLE ÇÖZ
+            $decrypted = $encryptionService->decryptPayload($payroll->encrypted_payload);
+
+            return response()->json([
+                'payroll_id'        => $payroll->id,
+                'employee_id'       => $employee->id,
+                'decrypted_payload' => $decrypted,
+            ]);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'Failed to decrypt payload.',
+                'error'   => $e->getMessage(),
+            ], 422);
+        }
+    }
+
+    
 }

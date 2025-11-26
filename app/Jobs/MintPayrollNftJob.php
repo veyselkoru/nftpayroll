@@ -52,6 +52,12 @@ class MintPayrollNftJob implements ShouldQueue
             return;
         }
 
+        // encrypted_payload yoksa IPFS'e çıkmak KVKK açısından anlamsız
+        if (empty($payroll->encrypted_payload)) {
+            $this->failJob($nftMint, $payroll, 'Missing encrypted payroll payload');
+            return;
+        }
+
         // Cüzdan adresi (önce NftMint, yoksa employee wallet)
         $walletAddress = $nftMint->wallet_address ?: optional($payroll->employee)->wallet_address;
 
@@ -66,18 +72,16 @@ class MintPayrollNftJob implements ShouldQueue
 
         /*
         |--------------------------------------------------------------------------
-        | 1) METADATA OLUŞTUR
+        | 1) METADATA OLUŞTUR (KVKK SAFE)
         |--------------------------------------------------------------------------
+        | BURASI ARTIK DÜZ MAAŞ VERİSİ GÖNDERMİYOR.
+        | Sadece Laravel'in AES-256 ile şifrelediği payload'ı taşıyoruz.
         */
         $metadata = [
-            'name'        => "Payroll NFT #{$payroll->id}",
-            'description' => "Payroll token for employee #{$payroll->employee_id}",
-            'data'        => [
-                'period_start' => $payroll->period_start,
-                'period_end'   => $payroll->period_end,
-                'gross_salary' => $payroll->gross_salary,
-                'net_salary'   => $payroll->net_salary,
-            ],
+            'name'             => "Payroll NFT #{$payroll->id}",
+            'description'      => "Encrypted payroll metadata for employee #{$payroll->employee_id}",
+            'encrypted_payload'=> $payroll->encrypted_payload, // 🔐 ŞİFRELİ VERİ
+            'version'          => '1.0',
         ];
 
         /*
