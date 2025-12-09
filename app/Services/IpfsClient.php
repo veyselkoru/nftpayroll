@@ -13,15 +13,25 @@ class IpfsClient
         $baseUrl = rtrim(config('services.ipfs.base_url', env('IPFS_API_BASE_URL')), '/');
 
         // Burayı seçtiğin provider’a göre özelleştireceksin
-        $response = Http::withHeaders([
+        /* $response = Http::withHeaders([
                 'pinata_api_key'    => env('IPFS_API_KEY'),
                 'pinata_secret_api_key' => env('IPFS_API_SECRET'),
             ])
+            ->withBody($json, 'application/json')
             ->post($baseUrl . '/pinJSONToIPFS', [
                 'pinataContent' => [
                     'data' => $content,
                 ],
-            ]);
+            ]); */
+
+        $response = Http::withHeaders([
+            'pinata_api_key'        => env('IPFS_API_KEY'),
+            'pinata_secret_api_key' => env('IPFS_API_SECRET'),
+        ])
+        ->post($baseUrl . '/pinJSONToIPFS', [
+            'pinataContent' => $content,
+        ]);
+            
 
         if (! $response->successful()) {
             Log::error('IPFS upload failed', [
@@ -43,4 +53,31 @@ class IpfsClient
 
         return $cid;
     }
+
+    public function uploadJson(array $metadata)
+    {
+        $baseUrl = rtrim(config('services.ipfs.base_url', env('IPFS_API_BASE_URL')), '/');
+
+        $response = Http::withHeaders([
+            'pinata_api_key'        => env('IPFS_API_KEY'),
+            'pinata_secret_api_key' => env('IPFS_API_SECRET'),
+        ])
+        ->post($baseUrl . '/pinJSONToIPFS', [
+            'pinataContent' => $metadata,
+        ]);
+
+        if (! $response->successful()) {
+            Log::error('IPFS upload failed', [
+                'status' => $response->status(),
+                'body'   => $response->body(),
+            ]);
+
+            throw new \RuntimeException('IPFS upload failed');
+        }
+        $data = $response->json();
+        $cid = $data['IpfsHash'] ?? null;
+
+        return $cid;
+    }
+
 }

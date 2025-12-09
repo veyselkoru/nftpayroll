@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Controllers\Api\Concerns\AuthorizesCompany;
 use App\Models\Company;
 use App\Models\Employee;
 use App\Models\Payroll;
@@ -11,6 +12,7 @@ use Illuminate\Http\Request;
 
 class EmployeeController extends Controller
 {
+    use AuthorizesCompany;
     public function index(Request $request, Company $company)
     {
         $this->authorizeCompany($request->user(), $company);
@@ -25,17 +27,47 @@ class EmployeeController extends Controller
         $this->authorizeCompany($request->user(), $company);
 
         $data = $request->validate([
-            'name'          => 'required|string|max:255',
-            'surname'       => 'required|string|max:255',
-            'email'         => 'nullable|email',
-            'wallet_address'=> 'nullable|string|max:255',
-            'national_id'   => 'nullable|string|max:50',
+            'employee_code'  => 'nullable|string|max:50',
+            'name'           => 'required|string|max:255',
+            'tc_no'          => 'nullable|string|min:11|max:11',
+            'position'       => 'nullable|string|max:100',
+            'department'     => 'nullable|string|max:100',
+            'start_date'     => 'nullable|date',
+            'status'         => 'nullable|string|in:active,inactive',
+            'wallet_address' => [
+                'nullable',
+                'string',
+                'max:42',
+                'regex:/^0x[0-9a-fA-F]{40}$/',
+            ],
+        ], [
+            'tc_no.min' => 'TC Kimlik No 11 haneli olmalıdır.',
+            'tc_no.max' => 'TC Kimlik No 11 haneli olmalıdır.',
+            'wallet_address.regex' => 'Wallet adresi geçerli bir Ethereum adresi olmalıdır.',
         ]);
 
-        $employee = $company->employees()->create($data);
+        // status gönderilmediyse default aktif
+        if (empty($data['status'])) {
+            $data['status'] = 'active';
+        }
+
+        $fullName = trim($request->input('name')); // "samet mehmet altın"
+        $fullName = preg_replace('/\s+/', ' ', $fullName);
+        $parts = explode(' ', $fullName);
+        $surname = array_pop($parts);    // Son eleman soyad
+        $name = implode(' ', $parts);    // Geriye kalanlar ad
+
+        $data['name'] = $name;
+        $data['surname'] = $surname;
+
+
+        $employee = Employee::create([
+            'company_id' => $company->id,
+        ] + $data);
 
         return response()->json($employee, 201);
     }
+
 
     public function show(Request $request, Company $company, Employee $employee)
     {
@@ -48,20 +80,34 @@ class EmployeeController extends Controller
     public function update(Request $request, Company $company, Employee $employee)
     {
         $this->authorizeCompany($request->user(), $company);
-        $this->authorizeEmployeeBelongsToCompany($employee, $company);
 
         $data = $request->validate([
-            'name'          => 'sometimes|required|string|max:255',
-            'surname'       => 'sometimes|required|string|max:255',
-            'email'         => 'nullable|email',
-            'wallet_address'=> 'nullable|string|max:255',
-            'national_id'   => 'nullable|string|max:50',
+            'employee_code'  => 'sometimes|nullable|string|max:50',
+            'name'           => 'sometimes|required|string|max:255',
+            'tc_no'          => 'sometimes|nullable|string|min:11|max:11',
+            'position'       => 'sometimes|nullable|string|max:100',
+            'department'     => 'sometimes|nullable|string|max:100',
+            'start_date'     => 'sometimes|nullable|date',
+            'status'         => 'sometimes|nullable|string|in:active,inactive',
+            'wallet_address' => [
+                'sometimes',
+                'nullable',
+                'string',
+                'max:42',
+                'regex:/^0x[0-9a-fA-F]{40}$/',
+            ],
+        ], [
+            'tc_no.min' => 'TC Kimlik No 11 haneli olmalıdır.',
+            'tc_no.max' => 'TC Kimlik No 11 haneli olmalıdır.',
+            'wallet_address.regex' => 'Wallet adresi geçerli bir Ethereum adresi olmalıdır.',
         ]);
 
         $employee->update($data);
 
         return response()->json($employee);
     }
+
+
 
     public function destroy(Request $request, Company $company, Employee $employee)
     {

@@ -46,4 +46,13 @@ class NftMint extends Model
     {
         return $this->belongsTo(Payroll::class);
     }
+
+    public function getImageUrlAttribute()
+    {
+        if (!$this->ipfs_cid) return null;
+
+        // Görsel kendi imageCID üzerinden
+        $imageCid = env('NFTPAYROLL_IMAGE_CID');
+        return "https://ipfs.io/ipfs/{$imageCid}";
+    }
 }

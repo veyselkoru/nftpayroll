@@ -11,11 +11,20 @@ class Employee extends Model
 
     protected $fillable = [
         'company_id',
+        'employee_code',
         'name',
         'surname',
-        'email',
+        'tc_no',
+        'position',
+        'department',
+        'start_date',
+        'status',
         'wallet_address',
-        'national_id',
+    ];
+
+    protected $casts = [
+        'tc_no' => 'encrypted',
+        'start_date' => 'date',
     ];
 
     public function company()

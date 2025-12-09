@@ -11,9 +11,14 @@ class Company extends Model
     protected $fillable = [
         'owner_id',
         'name',
+        'type',
         'tax_number',
+        'registration_number',
         'country',
         'city',
+        'address',
+        'contact_phone',
+        'contact_email',
     ];
 
     public function owner()

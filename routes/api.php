@@ -3,6 +3,7 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\CompanyController;
 use App\Http\Controllers\Api\EmployeeController;
 use App\Http\Controllers\Api\PayrollController;
@@ -52,5 +53,15 @@ Route::middleware('auth:sanctum')->group(function () {
         '/companies/{company}/employees/{employee}/payrolls/{payroll}/decrypt',
         [PayrollController::class, 'decryptPayload']
     )->middleware('auth:sanctum');
+
+    Route::get('/dashboard/summary', [DashboardController::class, 'summary'])->middleware('auth:sanctum');
+    Route::get('/dashboard/recent-mints', [DashboardController::class, 'recentMints'])->middleware('auth:sanctum');
+
+    Route::get(
+        '/companies/{company}/nfts',
+        [CompanyController::class, 'nfts']
+    )->middleware('auth:sanctum');
+    
+
     
 });

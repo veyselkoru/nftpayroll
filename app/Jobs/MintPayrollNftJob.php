@@ -18,11 +18,14 @@ class MintPayrollNftJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public $tries = 5;
-    public $retryAfter = 10;
+    /**
+     * Queue retry ayarları
+     */
+    public int $tries = 5;
+    public int $retryAfter = 10;
 
     /**
-     * Model taşımıyoruz, sadece ID taşıyoruz (typed property hatasına çözüm)
+     * Model taşımıyoruz, sadece ID taşıyoruz (typed property hatası için)
      */
     public int $nftMintId;
 
@@ -37,6 +40,9 @@ class MintPayrollNftJob implements ShouldQueue
         $nftMint = NftMint::with('payroll.employee')->find($this->nftMintId);
 
         if (! $nftMint) {
+            Log::warning('Mint job: NftMint not found', [
+                'nft_mint_id' => $this->nftMintId,
+            ]);
             return;
         }
 
@@ -49,6 +55,10 @@ class MintPayrollNftJob implements ShouldQueue
 
         // Sadece pending durumunda işleme al
         if ($nftMint->status !== 'pending') {
+            Log::info('Mint job skipped, status is not pending', [
+                'nft_mint_id' => $nftMint->id,
+                'status'      => $nftMint->status,
+            ]);
             return;
         }
 
@@ -74,14 +84,23 @@ class MintPayrollNftJob implements ShouldQueue
         |--------------------------------------------------------------------------
         | 1) METADATA OLUŞTUR (KVKK SAFE)
         |--------------------------------------------------------------------------
-        | BURASI ARTIK DÜZ MAAŞ VERİSİ GÖNDERMİYOR.
         | Sadece Laravel'in AES-256 ile şifrelediği payload'ı taşıyoruz.
         */
+
+        $imageCid = env('NFTPAYROLL_IMAGE_CID');
+
+        if (! $imageCid) {
+            $this->failJob($nftMint, $payroll, 'NFTPAYROLL_IMAGE_CID env not set');
+            return;
+        }
+
         $metadata = [
-            'name'             => "Payroll NFT #{$payroll->id}",
-            'description'      => "Encrypted payroll metadata for employee #{$payroll->employee_id}",
-            'encrypted_payload'=> $payroll->encrypted_payload, // 🔐 ŞİFRELİ VERİ
-            'version'          => '1.0',
+            'name'              => "Payroll NFT #{$payroll->id}",
+            'description'       => "Encrypted payroll metadata for employee #{$payroll->employee_id}",
+            'encrypted_payload' => $payroll->encrypted_payload, // 🔐 şifreli veri
+            'version'           => '1.0',
+            // MetaMask için https URL (ipfs:// yerine)
+            'image'             => "https://ipfs.io/ipfs/{$imageCid}",
         ];
 
         /*
@@ -90,10 +109,15 @@ class MintPayrollNftJob implements ShouldQueue
         |--------------------------------------------------------------------------
         */
         try {
-            $json    = json_encode($metadata, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             /** @var IpfsClient $ipfs */
-            $ipfs    = app(IpfsClient::class);
-            $ipfsCid = $ipfs->uploadString($json); // Pinata → IpfsHash
+            $ipfs = app(IpfsClient::class);
+
+            // uploadJson ARRAY bekliyor, json_encode etmiyoruz
+            $ipfsCid = $ipfs->uploadJson($metadata);
+
+            if (! $ipfsCid || strlen($ipfsCid) < 20) {
+                throw new \Exception('Invalid IPFS CID returned: ' . print_r($ipfsCid, true));
+            }
 
             // Hem payroll hem nft_mints tablosuna yaz
             $nftMint->update(['ipfs_cid' => $ipfsCid]);
@@ -132,7 +156,11 @@ class MintPayrollNftJob implements ShouldQueue
 
             if (! $process->isSuccessful()) {
                 $error = $process->getErrorOutput() ?: $process->getOutput();
-                Log::error('Mint failed (node)', ['error' => $error]);
+
+                Log::error('Mint failed (node)', [
+                    'nft_mint_id' => $nftMint->id,
+                    'error'       => $error,
+                ]);
 
                 $nftMint->update([
                     'status'        => 'failed',
@@ -144,20 +172,22 @@ class MintPayrollNftJob implements ShouldQueue
                 return;
             }
 
-            $output = trim($process->getOutput());
-            $lines  = preg_split("/\r\n|\n|\r/", $output);
-            $txHash = trim(end($lines));   // dotenv vs. satırlar varsa, son satır hash
+            // ÇIKTI → TX HASH PARSE
+            $output = $process->getOutput() . "\n" . $process->getErrorOutput();
 
-            // Hash formatı kontrolü
-            if (! str_starts_with($txHash, '0x') || strlen($txHash) !== 66) {
-                Log::warning('Unexpected tx hash format', [
-                    'raw_output' => $output,
-                    'parsed'     => $txHash,
+            // Sadece 0x + 64 hex karakter olan patterni yakala
+            preg_match('/0x[a-fA-F0-9]{64}/', $output, $matches);
+            $txHash = $matches[0] ?? null;
+
+            if (! $txHash) {
+                Log::warning('TX hash not found in node output', [
+                    'nft_mint_id' => $nftMint->id,
+                    'raw_output'  => $output,
                 ]);
 
                 $nftMint->update([
                     'status'        => 'failed',
-                    'error_message' => 'Invalid tx hash format from node script',
+                    'error_message' => 'Invalid or missing tx hash from node script',
                 ]);
 
                 $payroll->update(['status' => 'mint_failed']);
@@ -194,53 +224,81 @@ class MintPayrollNftJob implements ShouldQueue
                 throw new \Exception('CHAIN_RPC_URL not set');
             }
 
-            $response = Http::withHeaders([
-                'Content-Type' => 'application/json',
-            ])->post($rpcUrl, [
-                'jsonrpc' => '2.0',
-                'method'  => 'eth_getTransactionReceipt',
-                'params'  => [$txHash],
-                'id'      => 1,
-            ]);
-
-            if (! $response->successful()) {
-                throw new \Exception('RPC request failed: '.$response->status());
-            }
-
-            $result = $response->json('result');
-
-            if (! $result || empty($result['logs'])) {
-                throw new \Exception('No logs in receipt');
-            }
-
             $contractAddress = strtolower(env('PAYROLL_NFT_CONTRACT_ADDRESS'));
-            $transferSig     = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+            if (! $contractAddress) {
+                throw new \Exception('PAYROLL_NFT_CONTRACT_ADDRESS not set');
+            }
 
-            $tokenId = null;
+            $transferSig = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 
-            foreach ($result['logs'] as $log) {
-                // Sadece bizim kontrat
-                if (strtolower($log['address'] ?? '') !== $contractAddress) {
+            $tokenId  = null;
+            $attempts = 0;
+
+            while ($attempts < 3 && $tokenId === null) {
+                // Biraz bekle, node full receipt'i yazsın
+                usleep(800000); // 0.8 saniye
+
+                $response = Http::withHeaders([
+                    'Content-Type' => 'application/json',
+                ])->post($rpcUrl, [
+                    'jsonrpc' => '2.0',
+                    'method'  => 'eth_getTransactionReceipt',
+                    'params'  => [$txHash],
+                    'id'      => 1,
+                ]);
+
+                if (! $response->successful()) {
+                    Log::warning('RPC request not successful when resolving token ID', [
+                        'nft_mint_id' => $nftMint->id,
+                        'status'      => $response->status(),
+                        'body'        => $response->body(),
+                    ]);
+                    $attempts++;
                     continue;
                 }
 
-                // Transfer event
-                if (! isset($log['topics'][0]) || strtolower($log['topics'][0]) !== $transferSig) {
+                $result = $response->json('result');
+
+                if (! $result || empty($result['logs'])) {
+                    Log::info('No logs in receipt yet, retrying...', [
+                        'nft_mint_id' => $nftMint->id,
+                        'attempt'     => $attempts + 1,
+                    ]);
+                    $attempts++;
                     continue;
                 }
 
-                // tokenId topic[3]
-                if (! isset($log['topics'][3])) {
-                    continue;
+                foreach ($result['logs'] as $log) {
+                    // Sadece bizim kontrat
+                    if (strtolower($log['address'] ?? '') !== $contractAddress) {
+                        continue;
+                    }
+
+                    // Transfer event
+                    if (! isset($log['topics'][0]) || strtolower($log['topics'][0]) !== $transferSig) {
+                        continue;
+                    }
+
+                    // tokenId topic[3]
+                    if (! isset($log['topics'][3])) {
+                        continue;
+                    }
+
+                    $tokenIdHex = $log['topics'][3];
+                    $tokenId    = hexdec($tokenIdHex);
+                    break;
                 }
 
-                $tokenIdHex = $log['topics'][3];
-                $tokenId    = hexdec($tokenIdHex);
-                break;
+                $attempts++;
             }
 
             if ($tokenId === null) {
-                throw new \Exception('Transfer event not found for contract');
+                Log::warning('Token ID resolve failed after retries', [
+                    'nft_mint_id' => $nftMint->id,
+                    'tx_hash'     => $txHash,
+                ]);
+                // Burada job'u fail etmiyoruz, sadece token_id boş kalır
+                return;
             }
 
             $nftMint->update([
@@ -253,7 +311,7 @@ class MintPayrollNftJob implements ShouldQueue
                 'token_id'    => $tokenId,
             ]);
         } catch (\Throwable $e) {
-            Log::warning('Token ID resolve failed', [
+            Log::warning('Token ID resolve exception', [
                 'nft_mint_id' => $nftMint->id,
                 'tx_hash'     => $txHash ?? null,
                 'error'       => $e->getMessage(),
@@ -274,6 +332,7 @@ class MintPayrollNftJob implements ShouldQueue
 
         Log::error('Mint job failed', [
             'nft_mint_id' => $nftMint->id,
+            'payroll_id'  => $payroll->id ?? null,
             'message'     => $msg,
         ]);
     }
