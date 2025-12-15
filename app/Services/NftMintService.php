@@ -3,10 +3,10 @@
 namespace App\Services;
 
 use Illuminate\Support\Facades\Log;
-use Web3\Web3;
-use Web3\Contract;
-use Web3p\EthereumTx\Transaction;
-use App\Services\AbiEncoder;
+//use Web3\Web3;
+//use Web3\Contract;
+//use Web3p\EthereumTx\Transaction;
+//use App\Services\AbiEncoder;
 
 class NftMintService
 {
@@ -30,8 +30,6 @@ class NftMintService
     }
 
     /**
-     * @return string tx hash
-     */
     public function mintTo(string $toAddress, string $tokenUri): string
     {
         $web3 = new Web3($this->rpcUrl);
@@ -78,5 +76,5 @@ class NftMintService
         return $txHash;
     }
 
-    
+    */
 }
