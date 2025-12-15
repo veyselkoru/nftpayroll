@@ -11,6 +11,8 @@ use App\Models\NftMint;
 use App\Services\PayrollEncryptionService;
 use App\Jobs\MintPayrollNftJob;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
 
 class PayrollController extends Controller
 {
@@ -33,9 +35,9 @@ class PayrollController extends Controller
             return [
                 'id'              => $p->id,
                 'employee_id'     => $p->employee_id,
-                'period_start'    => optional($p->period_start)->toDateString(),
-                'period_end'      => optional($p->period_end)->toDateString(),
-                'payment_date'    => optional($p->payment_date)->toDateString(),
+                'period_start'    => optional($p->period_start)->format('d-m-Y'),
+                'period_end'      => optional($p->period_end)->format('d-m-Y'),
+                'payment_date'    => optional($p->payment_date)->format('d-m-Y'),
                 'currency'        => $p->currency,
                 'gross_salary'    => $p->gross_salary,
                 'net_salary'      => $p->net_salary,
@@ -91,8 +93,17 @@ class PayrollController extends Controller
             'batch_id'           => ['nullable', 'string', 'max:100'],
             'external_batch_ref' => ['nullable', 'string', 'max:100'],
             'external_ref'       => ['nullable', 'string', 'max:100'],
+            'national_id' => ['nullable', 'string', 'size:11'],
         ]);
 
+        if (!empty($data['national_id'])) {
+            if ($employee->national_id === null || $data['national_id'] !== $employee->national_id) {
+                return response()->json([
+                    'message' => 'national_id bu çalışanın TC kaydıyla uyuşmuyor.',
+                ], 422);
+            }
+        }
+        
         // Varsayılan para birimi
         if (empty($data['currency'])) {
             $data['currency'] = 'TRY';
@@ -134,7 +145,8 @@ class PayrollController extends Controller
             'encrypted_payload'  => $encryptedPayload,
         ]);
 
-        return response()->json($payroll, 201);
+        $this->queueMintForPayroll($employee, $payroll);
+        return response()->json($payroll->fresh(), 201);
     }
 
     public function update(Request $request, Company $company, Employee $employee, Payroll $payroll)
@@ -213,6 +225,51 @@ class PayrollController extends Controller
             abort(404, 'Bordro bu çalışana ait değil');
         }
     }
+
+    /**
+     * Tek bir payroll için NftMint kaydı oluşturup kuyruğa atar.
+     * Queue endpoint'inde kullandığın mantığın aynısı, ama HTTP response döndürmüyor.
+     */
+    protected function queueMintForPayroll(Employee $employee, Payroll $payroll): ?NftMint
+    {
+        $nftMint = $payroll->nftMint;
+
+        // Zaten pending / processing / sent ise tekrar kuyruğa almıyoruz
+        if ($nftMint && in_array($nftMint->status, ['pending', 'processing', 'sent'])) {
+            return $nftMint;
+        }
+
+        // 3) NftMint kaydını oluştur veya resetle (PayrollQueueController'dakiyle aynı)
+        if (! $nftMint) {
+            $nftMint = NftMint::create([
+                'payroll_id'     => $payroll->id,
+                'wallet_address' => $employee->wallet_address,
+                'status'         => 'pending',
+                'error_message'  => null,
+                'token_id'       => null,
+                'tx_hash'        => null,
+                'ipfs_cid'       => $payroll->ipfs_cid, // varsa
+            ]);
+        } else {
+            $nftMint->update([
+                'status'        => 'pending',
+                'error_message' => null,
+                'token_id'      => null,
+                'tx_hash'       => null,
+            ]);
+        }
+
+        // Payroll status: queued
+        $payroll->update([
+            'status' => 'queued',
+        ]);
+
+        // Job kuyruğa
+        MintPayrollNftJob::dispatch($nftMint);
+
+        return $nftMint;
+    }
+
 
     /**
      * Durum endpoint'i
@@ -325,5 +382,300 @@ class PayrollController extends Controller
         }
     }
 
+    // app/Http/Controllers/Api/PayrollController.php
+
+    public function bulkStore(
+        Request $request,
+        Company $company,
+        Employee $employee,
+        PayrollEncryptionService $encryptionService
+    ) {
+        // Çalışana erişim doğrulama
+        $this->authorizeAccess($request, $company, $employee);
+    
+        $items = $request->input('items');
+    
+        if (!is_array($items)) {
+            return response()->json([
+                'message' => 'items alanı zorunlu ve dizi olmalıdır.',
+            ], 422);
+        }
+    
+        // İsteğe bağlı group id (kullanıcı göndermezse backend üretir)
+        $groupId = $request->input('payroll_group_id') ?: (string) Str::uuid();
+    
+        $rules = [
+            // 🔴 ÇALIŞAN TARAFINDA DA TC ZORUNLU
+            'national_id'        => ['required', 'string', 'size:11'],
+    
+            'period_start'       => ['required', 'date'],
+            'period_end'         => ['required', 'date', 'after_or_equal:period_start'],
+            'payment_date'       => ['nullable', 'date'],
+    
+            'currency'           => ['nullable', 'string', 'max:10'],
+    
+            'gross_salary'       => ['required', 'numeric'],
+            'net_salary'         => ['required', 'numeric'],
+            'bonus'              => ['nullable', 'numeric'],
+            'deductions_total'   => ['nullable', 'numeric'],
+    
+            'employer_sign_name'  => ['nullable', 'string', 'max:255'],
+            'employer_sign_title' => ['nullable', 'string', 'max:255'],
+    
+            'batch_id'           => ['nullable', 'string', 'max:100'],
+            'external_batch_ref' => ['nullable', 'string', 'max:100'],
+            'external_ref'       => ['nullable', 'string', 'max:100'],
+        ];
+    
+        $created = [];
+        $failed  = [];
+    
+        foreach ($items as $index => $data) {
+            if (!is_array($data)) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => ['Geçersiz kayıt formatı.'],
+                    'data'   => $data,
+                ];
+                continue;
+            }
+    
+            $validator = Validator::make($data, $rules);
+    
+            if ($validator->fails()) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => $validator->errors()->all(),
+                    'data'   => $data,
+                ];
+                continue;
+            }
+    
+            $row = $validator->validated();
+    
+            // 🔴 TC GERÇEKTEN BU ÇALIŞANA MI AİT?
+            if ($employee->national_id === null) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => ['Sistemde bu çalışana ait kayıtlı bir national_id (TC) yok.'],
+                    'data'   => $data,
+                ];
+                continue;
+            }
+    
+            if ($row['national_id'] !== $employee->national_id) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => ['Gönderilen national_id, bu çalışanın TC bilgisiyle uyuşmuyor.'],
+                    'data'   => $data,
+                ];
+                continue;
+            }
+    
+            if (empty($row['currency'])) {
+                $row['currency'] = 'TRY';
+            }
+    
+            $payload = [
+                'period_start'       => $row['period_start'],
+                'period_end'         => $row['period_end'],
+                'payment_date'       => $row['payment_date'] ?? null,
+                'currency'           => $row['currency'],
+                'gross_salary'       => $row['gross_salary'],
+                'net_salary'         => $row['net_salary'],
+                'bonus'              => $row['bonus'] ?? null,
+                'deductions_total'   => $row['deductions_total'] ?? null,
+                'employer_sign_name'  => $row['employer_sign_name'] ?? null,
+                'employer_sign_title' => $row['employer_sign_title'] ?? null,
+            ];
+    
+            $encryptedPayload = $encryptionService->encryptPayload($payload);
+    
+            try {
+                $payroll = Payroll::create([
+                    'employee_id'        => $employee->id,
+                    'payroll_group_id'   => $groupId,
+                    'period_start'       => $row['period_start'],
+                    'period_end'         => $row['period_end'],
+                    'payment_date'       => $row['payment_date'] ?? null,
+                    'currency'           => $row['currency'],
+                    'gross_salary'       => $row['gross_salary'],
+                    'net_salary'         => $row['net_salary'],
+                    'bonus'              => $row['bonus'] ?? null,
+                    'deductions_total'   => $row['deductions_total'] ?? null,
+                    'employer_sign_name' => $row['employer_sign_name'] ?? null,
+                    'employer_sign_title'=> $row['employer_sign_title'] ?? null,
+                    'batch_id'           => $row['batch_id'] ?? null,
+                    'external_batch_ref' => $row['external_batch_ref'] ?? null,
+                    'external_ref'       => $row['external_ref'] ?? null,
+                    'status'             => 'pending',
+                    'encrypted_payload'  => $encryptedPayload,
+                ]);
+    
+                // 🔁 Her payroll için otomatik mint kuyruğu
+                $this->queueMintForPayroll($employee, $payroll);
+    
+                $created[] = $payroll;
+            } catch (\Throwable $e) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => [$e->getMessage()],
+                    'data'   => $data,
+                ];
+            }
+        }
+    
+        return response()->json([
+            'payroll_group_id' => $groupId,
+            'created_count'    => count($created),
+            'failed_count'     => count($failed),
+            'created'          => $created,
+            'failed'           => $failed,
+        ]);
+    }
+
+    public function bulkStoreForCompany(
+        Request $request,
+        Company $company,
+        PayrollEncryptionService $encryptionService
+    ) {
+        // Sadece şirket sahibi erişsin (senin projene göre değiştir)
+        if ($company->owner_id !== $request->user()->id) {
+            abort(403, 'Yetkisiz');
+        }
+    
+        $items = $request->input('items');
+    
+        if (!is_array($items)) {
+            return response()->json([
+                'message' => 'items alanı zorunlu ve dizi olmalıdır.',
+            ], 422);
+        }
+    
+        $groupId = $request->input('payroll_group_id') ?: (string) Str::uuid();
+    
+        $rules = [
+            // 🔴 ŞİRKET BAZLI JSON İÇİN TC ZORUNLU
+            'national_id'        => ['required', 'string', 'size:11'],
+    
+            'period_start'       => ['required', 'date'],
+            'period_end'         => ['required', 'date', 'after_or_equal:period_start'],
+            'payment_date'       => ['nullable', 'date'],
+    
+            'currency'           => ['nullable', 'string', 'max:10'],
+    
+            'gross_salary'       => ['required', 'numeric'],
+            'net_salary'         => ['required', 'numeric'],
+            'bonus'              => ['nullable', 'numeric'],
+            'deductions_total'   => ['nullable', 'numeric'],
+    
+            'employer_sign_name'  => ['nullable', 'string', 'max:255'],
+            'employer_sign_title' => ['nullable', 'string', 'max:255'],
+    
+            'batch_id'           => ['nullable', 'string', 'max:100'],
+            'external_batch_ref' => ['nullable', 'string', 'max:100'],
+            'external_ref'       => ['nullable', 'string', 'max:100'],
+        ];
+    
+        $created = [];
+        $failed  = [];
+    
+        foreach ($items as $index => $data) {
+            if (!is_array($data)) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => ['Geçersiz kayıt formatı.'],
+                    'data'   => $data,
+                ];
+                continue;
+            }
+    
+            $validator = Validator::make($data, $rules);
+    
+            if ($validator->fails()) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => $validator->errors()->all(),
+                    'data'   => $data,
+                ];
+                continue;
+            }
+    
+            $row = $validator->validated();
+    
+            // 🔴 TC ile şirketteki çalışanı bul
+            $employee = Employee::where('company_id', $company->id)
+                ->where('national_id', $row['national_id'])
+                ->first();
+    
+            if (!$employee) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => ['Bu national_id ile şirkette kayıtlı çalışan bulunamadı.'],
+                    'data'   => $data,
+                ];
+                continue;
+            }
+    
+            if (empty($row['currency'])) {
+                $row['currency'] = 'TRY';
+            }
+    
+            $payload = [
+                'period_start'       => $row['period_start'],
+                'period_end'         => $row['period_end'],
+                'payment_date'       => $row['payment_date'] ?? null,
+                'currency'           => $row['currency'],
+                'gross_salary'       => $row['gross_salary'],
+                'net_salary'         => $row['net_salary'],
+                'bonus'              => $row['bonus'] ?? null,
+                'deductions_total'   => $row['deductions_total'] ?? null,
+                'employer_sign_name'  => $row['employer_sign_name'] ?? null,
+                'employer_sign_title' => $row['employer_sign_title'] ?? null,
+            ];
+    
+            $encryptedPayload = $encryptionService->encryptPayload($payload);
+    
+            try {
+                $payroll = Payroll::create([
+                    'employee_id'        => $employee->id,
+                    'payroll_group_id'   => $groupId,
+                    'period_start'       => $row['period_start'],
+                    'period_end'         => $row['period_end'],
+                    'payment_date'       => $row['payment_date'] ?? null,
+                    'currency'           => $row['currency'],
+                    'gross_salary'       => $row['gross_salary'],
+                    'net_salary'         => $row['net_salary'],
+                    'bonus'              => $row['bonus'] ?? null,
+                    'deductions_total'   => $row['deductions_total'] ?? null,
+                    'employer_sign_name' => $row['employer_sign_name'] ?? null,
+                    'employer_sign_title'=> $row['employer_sign_title'] ?? null,
+                    'batch_id'           => $row['batch_id'] ?? null,
+                    'external_batch_ref' => $row['external_batch_ref'] ?? null,
+                    'external_ref'       => $row['external_ref'] ?? null,
+                    'status'             => 'pending',
+                    'encrypted_payload'  => $encryptedPayload,
+                ]);
+    
+                $this->queueMintForPayroll($employee, $payroll);
+    
+                $created[] = $payroll;
+            } catch (\Throwable $e) {
+                $failed[] = [
+                    'index'  => $index,
+                    'errors' => [$e->getMessage()],
+                    'data'   => $data,
+                ];
+            }
+        }
+    
+        return response()->json([
+            'payroll_group_id' => $groupId,
+            'created_count'    => count($created),
+            'failed_count'     => count($failed),
+            'created'          => $created,
+            'failed'           => $failed,
+        ]);
+    }
     
 }

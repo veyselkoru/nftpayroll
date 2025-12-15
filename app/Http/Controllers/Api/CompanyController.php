@@ -94,32 +94,66 @@ class CompanyController extends Controller
             abort(403, 'Bu şirkete erişim yetkiniz yok');
         }
 
-        $nfts = \App\Models\NftMint::whereHas('payroll.employee', function ($q) use ($company) {
-            $q->where('company_id', $company->id);
-        })
-        ->with('payroll.employee')
-        ->orderBy('id', 'desc')
-        ->get()
-        ->map(function ($mint) {
+        $status = $request->query('status');      // pending | sending | sent | failed | (boş = hepsi)
+        $search = $request->query('search');      // çalışan adı, tx hash, token id için
+        $perPage = (int) $request->query('per_page', 100); // default 100, istersen değiştir
+
+        $query = \App\Models\NftMint::whereHas('payroll.employee', function ($q) use ($company) {
+                $q->where('company_id', $company->id);
+            })
+            ->with(['payroll.employee']);
+
+        // Status filtresi (opsiyonel)
+        if ($status && $status !== 'all') {
+            $query->where('status', $status);
+        }
+
+        // Arama filtresi (opsiyonel)
+        if ($search) {
+            $search = trim($search);
+            $query->where(function ($q) use ($search) {
+                $q->whereHas('payroll.employee', function ($q2) use ($search) {
+                    $q2->where('name', 'like', "%{$search}%")
+                    ->orWhere('national_id', 'like', "%{$search}%");
+                })
+                ->orWhere('tx_hash', 'like', "%{$search}%")
+                ->orWhere('token_id', 'like', "%{$search}%");
+            });
+        }
+
+        $paginator = $query
+            ->orderByDesc('id')
+            ->paginate($perPage);
+
+        // Collection’ı map’leyip insan okunur hale getiriyoruz
+        $nfts = $paginator->getCollection()->map(function ($mint) {
             return [
                 'id'           => $mint->id,
                 'token_id'     => $mint->token_id,
                 'tx_hash'      => $mint->tx_hash,
                 'employee'     => $mint->payroll->employee->name ?? null,
+                'national_id'  => $mint->payroll->employee->national_id ?? null,
                 'ipfs_url'     => $mint->ipfs_cid
                     ? 'https://ipfs.io/ipfs/'.$mint->ipfs_cid
                     : null,
                 'explorer_url' => $mint->tx_hash
                     ? 'https://sepolia.etherscan.io/tx/'.$mint->tx_hash
                     : null,
+                'image_url'    => $mint->image_url, // accessor’dan geliyor
                 'status'       => $mint->status,
                 'created_at'   => $mint->created_at,
+                'created_at_formatted' => optional($mint->created_at)->format('Y-m-d H:i'),
             ];
-        });
-    
+        })->values();
+
         return response()->json([
-            'company_id' => $company->id,
-            'nfts'       => $nfts,
+            'company_id'   => $company->id,
+            'nfts'         => $nfts,
+            // pagination meta – mevcut frontend sadece nfts’i kullanmaya devam edebilir
+            'current_page' => $paginator->currentPage(),
+            'last_page'    => $paginator->lastPage(),
+            'per_page'     => $paginator->perPage(),
+            'total'        => $paginator->total(),
         ]);
     }
 

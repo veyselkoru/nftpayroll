@@ -61,7 +61,15 @@ Route::middleware('auth:sanctum')->group(function () {
         '/companies/{company}/nfts',
         [CompanyController::class, 'nfts']
     )->middleware('auth:sanctum');
-    
 
+    Route::post(
+        'companies/{company}/employees/{employee}/payrolls/bulk',
+        [PayrollController::class, 'bulkStore']
+    );
+
+    Route::post(
+        'companies/{company}/payrolls/bulk',
+        [PayrollController::class, 'bulkStoreForCompany']
+    )->middleware('auth:sanctum');    
     
 });
