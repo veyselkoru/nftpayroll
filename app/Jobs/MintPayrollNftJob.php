@@ -168,6 +168,8 @@ class MintPayrollNftJob implements ShouldQueue
                 ]);
 
                 $payroll->update(['status' => 'mint_failed']);
+                
+                throw new \RuntimeException($process->getErrorOutput());
 
                 return;
             }
