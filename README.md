@@ -7,6 +7,51 @@
 <a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
 </p>
 
+## Proje Tanimi
+
+NFT Payroll, sirketler icin calisan, bordro ve NFT mint sureclerini yoneten bir Laravel API projesidir.
+API tarafinda kimlik dogrulama (Sanctum), sirket/employee/payroll yonetimi ve zincir uzerine mint is akislari bulunur.
+
+## Swagger Dokumantasyonu
+
+Swagger UI:
+
+`http://localhost/swagger`
+
+Swagger JSON:
+
+`http://localhost/docs`
+
+## New Admin Modules API
+
+All new module endpoints are under `/api/*` and protected with `auth:sanctum`.
+Response envelope format:
+
+- success: `{"data": ..., "meta": ..., "message": "..."}`
+- error: `{"message": "...", "errors": {...}}`
+
+Example calls:
+
+```bash
+curl -X GET "http://localhost:8000/api/operations/jobs?per_page=10&status=queued" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Accept: application/json"
+
+curl -X POST "http://localhost:8000/api/integrations" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"SAP Prod","provider":"sap","status":"active","config":{"endpoint":"https://sap.example.com"}}'
+
+curl -X POST "http://localhost:8000/api/wallets/bulk-validate" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"wallet_address":"0x1111111111111111111111111111111111111111","network":"sepolia"}]}'
+
+curl -X GET "http://localhost:8000/api/system-health/overview" \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Accept: application/json"
+```
+
 ## About Laravel
 
 Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:

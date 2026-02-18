@@ -22,13 +22,13 @@ class AuthController extends Controller
             'name'     => $data['name'],
             'email'    => $data['email'],
             'password' => Hash::make($data['password']),
-            'role'     => 'owner', // ilk kayıt olan genelde şirket sahibi
+            'role'     => User::ROLE_COMPANY_OWNER,
         ]);
 
         $token = $user->createToken('api_token')->plainTextToken;
 
         return response()->json([
-            'user'  => $user,
+            'user'  => $this->buildAuthUserPayload($user),
             'token' => $token,
         ], 201);
     }
@@ -51,14 +51,16 @@ class AuthController extends Controller
         $token = $user->createToken('api_token')->plainTextToken;
 
         return response()->json([
-            'user'  => $user,
+            'user'  => $this->buildAuthUserPayload($user),
             'token' => $token,
         ]);
     }
 
     public function me(Request $request)
     {
-        return response()->json($request->user());
+        $user = $request->user();
+
+        return response()->json($this->buildAuthUserPayload($user));
     }
 
     public function logout(Request $request)
@@ -66,5 +68,22 @@ class AuthController extends Controller
         $request->user()->currentAccessToken()->delete();
 
         return response()->json(['message' => 'Çıkış yapıldı']);
+    }
+
+    protected function buildAuthUserPayload(User $user): array
+    {
+        $role = $user->normalizedRole();
+
+        $apiPrefix = match ($role) {
+            User::ROLE_COMPANY_OWNER => '/api/owner',
+            User::ROLE_COMPANY_MANAGER => '/api/manager',
+            User::ROLE_EMPLOYEE => '/api/employee',
+            default => '/api',
+        };
+
+        return array_merge($user->toArray(), [
+            'role' => $role,
+            'api_prefix' => $apiPrefix,
+        ]);
     }
 }

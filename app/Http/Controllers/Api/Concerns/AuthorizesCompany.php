@@ -15,7 +15,15 @@ trait AuthorizesCompany
      */
     protected function authorizeCompany(User $user, Company $company): void
     {
-        if ((int) $company->owner_id !== (int) $user->id) {
+        $role = $user->normalizedRole();
+
+        $hasAccess = match ($role) {
+            User::ROLE_COMPANY_OWNER => (int) $company->owner_id === (int) $user->id,
+            User::ROLE_COMPANY_MANAGER, User::ROLE_EMPLOYEE => (int) ($user->company_id ?? 0) === (int) $company->id,
+            default => false,
+        };
+
+        if (! $hasAccess) {
             throw new AuthorizationException('You are not allowed to access this company.');
         }
     }

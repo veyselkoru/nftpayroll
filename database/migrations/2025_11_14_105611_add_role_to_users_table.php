@@ -12,7 +12,7 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('users', function (Blueprint $table) {
-            $table->string('role')->default('owner'); // owner | admin | ...
+            $table->string('role')->default('company_owner'); // company_owner | company_manager | employee
         });
     }
 

@@ -4,17 +4,32 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Controllers\Api\Concerns\AuthorizesCompany;
+use App\Mail\CompanyOwnerWelcomeMail;
 use App\Models\Company;
+use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Validation\ValidationException;
 
 class CompanyController extends Controller
 {
-    use AuthorizesCompany;
+    use AuthorizesCompany {
+        authorizeCompany as protected authorizeCompanyByRole;
+    }
 
     public function index(Request $request)
     {
-        // Sadece kullanıcının sahip olduğu şirketler
-        $companies = Company::where('owner_id', $request->user()->id)->get();
+        $user = $request->user();
+        $role = $user->normalizedRole();
+
+        $companies = match ($role) {
+            \App\Models\User::ROLE_COMPANY_OWNER => Company::where('owner_id', $user->id)->get(),
+            \App\Models\User::ROLE_COMPANY_MANAGER,
+            \App\Models\User::ROLE_EMPLOYEE => Company::where('id', $user->company_id)->get(),
+            default => collect(),
+        };
 
         return response()->json($companies);
     }
@@ -31,13 +46,60 @@ class CompanyController extends Controller
             'address'            => 'nullable|string|max:255',
             'contact_phone'      => 'nullable|string|max:50',
             'contact_email'      => 'nullable|email|max:255',
+            'owner_name'         => 'nullable|string|max:255',
+            'owner_email'        => 'nullable|email|max:255|unique:users,email',
         ]);
 
-        $company = Company::create([
-            'owner_id' => $request->user()->id,
-        ] + $data);
+        $ownerEmail = $data['owner_email'] ?? $data['contact_email'] ?? null;
+        if (! $ownerEmail) {
+            throw ValidationException::withMessages([
+                'owner_email' => ['owner_email veya contact_email zorunludur.'],
+            ]);
+        }
+        if (User::where('email', $ownerEmail)->exists()) {
+            throw ValidationException::withMessages([
+                'owner_email' => ['Bu e-posta ile kullanici zaten mevcut.'],
+            ]);
+        }
 
-        return response()->json($company, 201);
+        $ownerName = $data['owner_name'] ?? ($data['name'].' Owner');
+        $plainPassword = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+
+        $companyPayload = collect($data)->except(['owner_name', 'owner_email'])->toArray();
+
+        [$ownerUser, $company] = DB::transaction(function () use ($ownerName, $ownerEmail, $plainPassword, $companyPayload) {
+            $ownerUser = User::create([
+                'name' => $ownerName,
+                'email' => $ownerEmail,
+                'password' => Hash::make($plainPassword),
+                'role' => User::ROLE_COMPANY_OWNER,
+            ]);
+
+            $company = Company::create([
+                'owner_id' => $ownerUser->id,
+            ] + $companyPayload);
+
+            $ownerUser->update(['company_id' => $company->id]);
+
+            return [$ownerUser, $company];
+        });
+
+        if (empty($request->user()->company_id)) {
+            $request->user()->update(['company_id' => $company->id]);
+        }
+
+        Mail::to($ownerUser->email)->queue(new CompanyOwnerWelcomeMail(
+            ownerName: $ownerUser->name,
+            companyName: $company->name,
+            email: $ownerUser->email,
+            plainPassword: $plainPassword,
+        ));
+
+        return response()->json([
+            'company' => $company,
+            'owner_user_id' => $ownerUser->id,
+            'credentials_sent' => true,
+        ], 201);
     }
 
     public function update(Request $request, Company $company)
@@ -81,18 +143,13 @@ class CompanyController extends Controller
 
     protected function authorizeCompany($user, Company $company)
     {
-        if ($company->owner_id !== $user->id) {
-            abort(403, 'Bu şirkete erişim yetkiniz yok');
-        }
+        $this->authorizeCompanyByRole($user, $company);
     }
 
 
     public function nfts(Request $request, Company $company)
     {
-        // Şirket sahibi mi? (diğer action’lardaki authorizeCompany ile uyumlu)
-        if ($company->owner_id !== $request->user()->id) {
-            abort(403, 'Bu şirkete erişim yetkiniz yok');
-        }
+        $this->authorizeCompany($request->user(), $company);
 
         $status = $request->query('status');      // pending | sending | sent | failed | (boş = hepsi)
         $search = $request->query('search');      // çalışan adı, tx hash, token id için

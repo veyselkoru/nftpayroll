@@ -12,7 +12,9 @@ use Illuminate\Http\Request;
 
 class EmployeeController extends Controller
 {
-    use AuthorizesCompany;
+    use AuthorizesCompany {
+        authorizeCompany as protected authorizeCompanyByRole;
+    }
     public function index(Request $request, Company $company)
     {
         $this->authorizeCompany($request->user(), $company);
@@ -121,9 +123,7 @@ class EmployeeController extends Controller
 
     protected function authorizeCompany($user, Company $company)
     {
-        if ($company->owner_id !== $user->id) {
-            abort(403, 'Bu şirkete erişim yetkiniz yok');
-        }
+        $this->authorizeCompanyByRole($user, $company);
     }
 
     protected function authorizeEmployeeBelongsToCompany(Employee $employee, Company $company)
@@ -135,10 +135,7 @@ class EmployeeController extends Controller
 
     public function nfts(Request $request, Company $company, Employee $employee)
     {
-        // Şirket sahibi mi?
-        if ($company->owner_id !== $request->user()->id) {
-            abort(403, 'Yetkisiz');
-        }
+        $this->authorizeCompany($request->user(), $company);
 
         // Çalışan gerçekten bu şirkete mi ait?
         if ($employee->company_id !== $company->id) {

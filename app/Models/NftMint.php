@@ -11,10 +11,17 @@ class NftMint extends Model
 
     protected $fillable = [
         'payroll_id',
+        'company_id',
         'wallet_address',
         'ipfs_cid',
         'tx_hash',
         'token_id',
+        'network',
+        'gas_used',
+        'gas_fee_eth',
+        'gas_fee_fiat',
+        'cost_source',
+        'duration_ms',
         'status',
         'error_message'
     ];

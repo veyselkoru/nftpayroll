@@ -2,6 +2,9 @@
 
 namespace App\Jobs;
 
+use App\Events\Workflow\MintFailed;
+use App\Events\Workflow\MintStarted;
+use App\Events\Workflow\MintSucceeded;
 use App\Models\NftMint;
 use App\Models\Payroll;
 use App\Services\IpfsClient;
@@ -36,6 +39,8 @@ class MintPayrollNftJob implements ShouldQueue
 
     public function handle(): void
     {
+        $startedAtMs = (int) round(microtime(true) * 1000);
+
         // NftMint + Payroll + Employee ilişkileriyle beraber yükle
         $nftMint = NftMint::with('payroll.employee')->find($this->nftMintId);
 
@@ -135,6 +140,14 @@ class MintPayrollNftJob implements ShouldQueue
         |--------------------------------------------------------------------------
         */
         $nftMint->update(['status' => 'sending']);
+        $payroll->update(['status' => 'mint_processing']);
+
+        event(new MintStarted(
+            companyId: (int) $payroll->company_id,
+            employeeId: (int) $payroll->employee_id,
+            payrollId: (int) $payroll->id,
+            nftMintId: (int) $nftMint->id,
+        ));
 
         try {
             $projectRoot = base_path();
@@ -161,16 +174,7 @@ class MintPayrollNftJob implements ShouldQueue
                     'nft_mint_id' => $nftMint->id,
                     'error'       => $error,
                 ]);
-
-                $nftMint->update([
-                    'status'        => 'failed',
-                    'error_message' => trim($error),
-                ]);
-
-                $payroll->update(['status' => 'mint_failed']);
-                
-                throw new \RuntimeException($process->getErrorOutput());
-
+                $this->failJob($nftMint, $payroll, trim($error));
                 return;
             }
 
@@ -187,13 +191,7 @@ class MintPayrollNftJob implements ShouldQueue
                     'raw_output'  => $output,
                 ]);
 
-                $nftMint->update([
-                    'status'        => 'failed',
-                    'error_message' => 'Invalid or missing tx hash from node script',
-                ]);
-
-                $payroll->update(['status' => 'mint_failed']);
-
+                $this->failJob($nftMint, $payroll, 'Invalid or missing tx hash from node script');
                 return;
             }
 
@@ -203,7 +201,7 @@ class MintPayrollNftJob implements ShouldQueue
                 'tx_hash' => $txHash,
             ]);
 
-            $payroll->update(['status' => 'minted']);
+            $payroll->update(['status' => 'sent']);
 
             Log::info('Mint successful via node', [
                 'nft_mint_id' => $nftMint->id,
@@ -219,6 +217,7 @@ class MintPayrollNftJob implements ShouldQueue
         | 4) TRANSACTION RECEIPT → TOKEN ID ÇÖZ
         |--------------------------------------------------------------------------
         */
+        $receipt = null;
         try {
             $rpcUrl = env('CHAIN_RPC_URL');
 
@@ -260,6 +259,7 @@ class MintPayrollNftJob implements ShouldQueue
                 }
 
                 $result = $response->json('result');
+                $receipt = $result;
 
                 if (! $result || empty($result['logs'])) {
                     Log::info('No logs in receipt yet, retrying...', [
@@ -307,6 +307,8 @@ class MintPayrollNftJob implements ShouldQueue
                 'token_id' => $tokenId,
             ]);
 
+            $this->syncMintCostsFromReceipt($nftMint, $receipt);
+
             Log::info('Token ID resolved', [
                 'nft_mint_id' => $nftMint->id,
                 'tx_hash'     => $txHash,
@@ -319,6 +321,19 @@ class MintPayrollNftJob implements ShouldQueue
                 'error'       => $e->getMessage(),
             ]);
         }
+
+        $durationMs = max(0, ((int) round(microtime(true) * 1000)) - $startedAtMs);
+        $nftMint->update(['duration_ms' => $durationMs]);
+
+        event(new MintSucceeded(
+            companyId: (int) $payroll->company_id,
+            employeeId: (int) $payroll->employee_id,
+            payrollId: (int) $payroll->id,
+            nftMintId: (int) $nftMint->id,
+            txHash: $nftMint->tx_hash,
+            tokenId: $nftMint->token_id,
+            durationMs: $durationMs,
+        ));
     }
 
     private function failJob(NftMint $nftMint, ?Payroll $payroll, string $msg): void
@@ -336,6 +351,45 @@ class MintPayrollNftJob implements ShouldQueue
             'nft_mint_id' => $nftMint->id,
             'payroll_id'  => $payroll->id ?? null,
             'message'     => $msg,
+        ]);
+
+        if ($payroll) {
+            event(new MintFailed(
+                companyId: (int) $payroll->company_id,
+                employeeId: (int) $payroll->employee_id,
+                payrollId: (int) $payroll->id,
+                nftMintId: (int) $nftMint->id,
+                errorMessage: $msg,
+            ));
+        }
+    }
+
+    private function syncMintCostsFromReceipt(NftMint $nftMint, ?array $receipt): void
+    {
+        if (! is_array($receipt)) {
+            return;
+        }
+
+        $gasUsed = isset($receipt['gasUsed']) ? (int) hexdec((string) $receipt['gasUsed']) : null;
+        $gasPrice = null;
+
+        if (! empty($receipt['effectiveGasPrice'])) {
+            $gasPrice = (float) hexdec((string) $receipt['effectiveGasPrice']);
+        } elseif (! empty($receipt['gasPrice'])) {
+            $gasPrice = (float) hexdec((string) $receipt['gasPrice']);
+        }
+
+        $feeEth = null;
+        if ($gasUsed !== null && $gasPrice !== null) {
+            $feeWei = $gasUsed * $gasPrice;
+            $feeEth = $feeWei / 1_000_000_000_000_000_000;
+        }
+
+        $nftMint->update([
+            'network' => (string) env('CHAIN_NETWORK', 'sepolia'),
+            'gas_used' => $gasUsed,
+            'gas_fee_eth' => $feeEth !== null ? round($feeEth, 10) : null,
+            'cost_source' => $feeEth !== null ? 'onchain_receipt' : null,
         ]);
     }
 }
